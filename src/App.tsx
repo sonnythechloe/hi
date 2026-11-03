@@ -53,7 +53,78 @@ function LineChart({ series, years, normalized = false }: { series: Row[]; years
   </svg></div>;
 }
 
+const sensorSamples = [
+  { time: '14:20', value: 18 }, { time: '14:25', value: 24 },
+  { time: '14:30', value: 21 }, { time: '14:35', value: 38 },
+  { time: '14:40', value: 45 }, { time: '14:45', value: 41 },
+  { time: '14:50', value: 63 }, { time: '14:55', value: 57 },
+  { time: '15:00', value: 72 }, { time: '15:05', value: 68 },
+  { time: '15:10', value: 84 }, { time: '15:15', value: 76 },
+];
+
+function SensorChart() {
+  const width = 900, height = 310, left = 48, right = 24, top = 20, bottom = 42;
+  const x = (index: number) => left + index * (width - left - right) / (sensorSamples.length - 1);
+  const y = (value: number) => top + (100 - value) * (height - top - bottom) / 100;
+  const line = sensorSamples.map((sample, index) => `${x(index)},${y(sample.value)}`).join(' ');
+  const area = `${left},${height - bottom} ${line} ${x(sensorSamples.length - 1)},${height - bottom}`;
+
+  return <div className="sensor-chart-wrap">
+    <svg className="sensor-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="최근 1시간 터치센서 값 변화">
+      <defs>
+        <linearGradient id="sensorArea" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stopColor="#1859e8" stopOpacity=".2" />
+          <stop offset="1" stopColor="#1859e8" stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      {[0, 25, 50, 75, 100].map((value) => <g key={value}>
+        <line className="sensor-grid" x1={left} x2={width-right} y1={y(value)} y2={y(value)} />
+        <text x={left-12} y={y(value)+4} textAnchor="end">{value}</text>
+      </g>)}
+      <polygon points={area} fill="url(#sensorArea)" />
+      <polyline points={line} fill="none" stroke="#1859e8" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" />
+      {sensorSamples.map((sample, index) => <g key={sample.time}>
+        {index % 2 === 0 && <text x={x(index)} y={height-14} textAnchor="middle">{sample.time}</text>}
+        <circle cx={x(index)} cy={y(sample.value)} r={index === sensorSamples.length-1 ? 6 : 3} fill="white" stroke="#1859e8" strokeWidth={index === sensorSamples.length-1 ? 4 : 2} />
+      </g>)}
+    </svg>
+  </div>;
+}
+
+function SensorDashboard() {
+  const current = sensorSamples.at(-1)?.value ?? 0;
+  return <section className="sensor-page">
+    <div className="sensor-title">
+      <div><div className="eyebrow">LIVE SENSOR MONITOR</div><h1>터치센서 <em>모니터링</em></h1><p>센서의 현재 상태와 시간에 따른 변화를 확인하세요.</p></div>
+      <div className="live-pill"><i /> 실시간 예시 데이터</div>
+    </div>
+    <div className="sensor-overview">
+      <article className="current-card">
+        <div className="current-head"><span>현재 센서값</span><span className="device-tag">TOUCH—01</span></div>
+        <div className="current-value">{current}<small>%</small></div>
+        <div className="meter"><i style={{ width: `${current}%` }} /></div>
+        <div className="current-foot"><span><i className="status-dot" /> 정상 작동 중</span><span>방금 업데이트</span></div>
+      </article>
+      <div className="sensor-mini-grid">
+        <article><span>오늘 최고값</span><strong>84<small>%</small></strong><p>15:10 기록</p></article>
+        <article><span>최근 1시간 평균</span><strong>51<small>%</small></strong><p>12개 데이터 기준</p></article>
+        <article><span>센서 상태</span><strong className="connected">연결됨</strong><p>신호 강도 양호</p></article>
+        <article><span>마지막 터치</span><strong>15:15</strong><p>현재 세션</p></article>
+      </div>
+    </div>
+    <article className="card sensor-graph-card">
+      <div className="card-head">
+        <div><span className="icon blue"><Icon name="trend"/></span><div><h2>시간별 센서 변화</h2><p>최근 1시간 · 5분 간격 예시 데이터</p></div></div>
+        <div className="range-tabs"><button className="active">1시간</button><button>6시간</button><button>24시간</button></div>
+      </div>
+      <SensorChart />
+    </article>
+    <div className="mock-note"><strong>예시 데이터로 표시 중</strong><span>실제 센서 API 연결 시 현재값과 그래프가 자동으로 갱신됩니다.</span></div>
+  </section>;
+}
+
 export default function App() {
+  const [page, setPage] = useState<'household' | 'sensor'>('sensor');
   const [rows, setRows] = useState<Row[]>([]);
   const [years, setYears] = useState<string[]>([]);
   const [query, setQuery] = useState('');
@@ -73,9 +144,11 @@ export default function App() {
   return <main>
     <header>
       <div><div className="brand-mark"><Icon name="trend"/></div><div><strong>가구 흐름</strong><span>통계청 추계가구 데이터</span></div></div>
-      <div className="source">KOSIS · 2050—2052</div>
+      <nav className="main-nav"><button className={page === 'household' ? 'active' : ''} onClick={() => setPage('household')}>가구 데이터</button><button className={page === 'sensor' ? 'active' : ''} onClick={() => setPage('sensor')}>터치센서</button></nav>
+      <div className="source">{page === 'sensor' ? 'SENSOR · LIVE' : 'KOSIS · 2050—2052'}</div>
     </header>
 
+    {page === 'sensor' ? <SensorDashboard /> : <>
     <section className="hero">
       <div className="eyebrow">HOUSEHOLD DATA EXPLORER</div>
       <h1>대한민국 가구의<br/><em>내일을 읽다</em></h1>
@@ -113,5 +186,6 @@ export default function App() {
       </article>
     </section>
     <footer>자료: 통계청 장래가구추계 · 단위: 가구 <span>첨부 CSV 기준</span></footer>
+    </>}
   </main>;
 }
