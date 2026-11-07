@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { createClient } from '@supabase/supabase-js';
 
 type Row = { gender: string; age: string; values: number[] };
 const colors = ['#1859e8', '#10a579', '#f59e0b', '#8b5cf6', '#ef5b5b'];
@@ -53,73 +54,352 @@ function LineChart({ series, years, normalized = false }: { series: Row[]; years
   </svg></div>;
 }
 
-const sensorSamples = [
-  { time: '14:20', value: 18 }, { time: '14:25', value: 24 },
-  { time: '14:30', value: 21 }, { time: '14:35', value: 38 },
-  { time: '14:40', value: 45 }, { time: '14:45', value: 41 },
-  { time: '14:50', value: 63 }, { time: '14:55', value: 57 },
-  { time: '15:00', value: 72 }, { time: '15:05', value: 68 },
-  { time: '15:10', value: 84 }, { time: '15:15', value: 76 },
-];
+type SensorSample = { time: string; value: number; timestamp: number };
+type SerialPortLike = {
+  readable: ReadableStream<Uint8Array> | null;
+  open(options: { baudRate: number }): Promise<void>;
+  close(): Promise<void>;
+};
+type SerialApi = { requestPort(options: { filters: { usbVendorId: number; usbProductId: number }[] }): Promise<SerialPortLike> };
 
-function SensorChart() {
+function parseReading(record: Record<string, unknown>): SensorSample | null {
+  const value = typeof record.value === 'number'
+    ? record.value
+    : typeof record.value === 'string' && record.value.trim()
+      ? Number(record.value)
+      : Number.NaN;
+  const timestamp = typeof record.created_at === 'string' ? Date.parse(record.created_at) : Number.NaN;
+  if (!Number.isFinite(value) || !Number.isFinite(timestamp)) return null;
+
+  return {
+    time: new Date(timestamp).toLocaleTimeString('ko-KR', {
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+    }),
+    value,
+    timestamp,
+  };
+}
+
+function mergeSamples(current: SensorSample[], incoming: SensorSample[]) {
+  const unique = new Map<string, SensorSample>();
+  [...current, ...incoming].forEach((sample) => {
+    unique.set(`${sample.timestamp}:${sample.value}`, sample);
+  });
+  return [...unique.values()].sort((a, b) => a.timestamp - b.timestamp).slice(-100);
+}
+
+function SensorChart({ samples, emptyMessage }: { samples: SensorSample[]; emptyMessage: string }) {
   const width = 900, height = 310, left = 48, right = 24, top = 20, bottom = 42;
-  const x = (index: number) => left + index * (width - left - right) / (sensorSamples.length - 1);
-  const y = (value: number) => top + (100 - value) * (height - top - bottom) / 100;
-  const line = sensorSamples.map((sample, index) => `${x(index)},${y(sample.value)}`).join(' ');
-  const area = `${left},${height - bottom} ${line} ${x(sensorSamples.length - 1)},${height - bottom}`;
+  const values = samples.map((sample) => sample.value);
+  const min = values.length ? Math.min(...values) : 0;
+  const max = values.length ? Math.max(...values) : 100;
+  const padding = max === min ? Math.max(Math.abs(max) * .08, 1) : (max - min) * .08;
+  const low = min - padding, high = max + padding;
+  const x = (index: number) => left + index * (width - left - right) / Math.max(1, samples.length - 1);
+  const y = (value: number) => top + (high - value) * (height - top - bottom) / (high - low);
+  const line = samples.map((sample, index) => `${x(index)},${y(sample.value)}`).join(' ');
+  const area = samples.length ? `${x(0)},${height - bottom} ${line} ${x(samples.length - 1)},${height - bottom}` : '';
 
   return <div className="sensor-chart-wrap">
-    <svg className="sensor-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="최근 1시간 터치센서 값 변화">
+    <svg className="sensor-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="최근 센서값 변화">
       <defs>
         <linearGradient id="sensorArea" x1="0" y1="0" x2="0" y2="1">
           <stop offset="0" stopColor="#1859e8" stopOpacity=".2" />
           <stop offset="1" stopColor="#1859e8" stopOpacity="0" />
         </linearGradient>
       </defs>
-      {[0, 25, 50, 75, 100].map((value) => <g key={value}>
-        <line className="sensor-grid" x1={left} x2={width-right} y1={y(value)} y2={y(value)} />
-        <text x={left-12} y={y(value)+4} textAnchor="end">{value}</text>
-      </g>)}
-      <polygon points={area} fill="url(#sensorArea)" />
-      <polyline points={line} fill="none" stroke="#1859e8" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" />
-      {sensorSamples.map((sample, index) => <g key={sample.time}>
-        {index % 2 === 0 && <text x={x(index)} y={height-14} textAnchor="middle">{sample.time}</text>}
-        <circle cx={x(index)} cy={y(sample.value)} r={index === sensorSamples.length-1 ? 6 : 3} fill="white" stroke="#1859e8" strokeWidth={index === sensorSamples.length-1 ? 4 : 2} />
+      {[0, .25, .5, .75, 1].map((tick) => {
+        const value = high - tick * (high - low);
+        return <g key={tick}>
+          <line className="sensor-grid" x1={left} x2={width-right} y1={y(value)} y2={y(value)} />
+          <text x={left-12} y={y(value)+4} textAnchor="end">{Number(value.toPrecision(4))}</text>
+        </g>;
+      })}
+      {samples.length > 1 && <>
+        <polygon points={area} fill="url(#sensorArea)" />
+        <polyline points={line} fill="none" stroke="#1859e8" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" />
+      </>}
+      {samples.map((sample, index) => <g key={`${sample.time}-${index}`}>
+        {(index % Math.max(1, Math.ceil(samples.length / 6)) === 0 || index === samples.length - 1) && <text x={x(index)} y={height-14} textAnchor="middle">{sample.time}</text>}
+        <circle cx={x(index)} cy={y(sample.value)} r={index === samples.length-1 ? 6 : 3} fill="white" stroke="#1859e8" strokeWidth={index === samples.length-1 ? 4 : 2} />
       </g>)}
     </svg>
+    {!samples.length && <div className="sensor-chart-empty">{emptyMessage}</div>}
   </div>;
 }
 
 function SensorDashboard() {
-  const current = sensorSamples.at(-1)?.value ?? 0;
+  const [samples, setSamples] = useState<SensorSample[]>([]);
+  const [databaseStatus, setDatabaseStatus] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [databaseError, setDatabaseError] = useState('');
+  const [realtimeError, setRealtimeError] = useState('');
+  const [realtimeConnected, setRealtimeConnected] = useState(false);
+  const [serialLatest, setSerialLatest] = useState<number | null>(null);
+  const [status, setStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected');
+  const [serialError, setSerialError] = useState('');
+  const readerRef = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);
+  const portRef = useRef<SerialPortLike | null>(null);
+  const stopRef = useRef(false);
+  const mountedRef = useRef(true);
+  const current = samples.at(-1)?.value;
+  const highest = samples.length ? Math.max(...samples.map((sample) => sample.value)) : null;
+  const average = samples.length ? samples.reduce((sum, sample) => sum + sample.value, 0) / samples.length : null;
+  const numberFormat = new Intl.NumberFormat('ko-KR', { maximumFractionDigits: 2 });
+
+  useEffect(() => {
+    let active = true;
+    let initialLoadComplete = false;
+    let pendingReadings: SensorSample[] = [];
+    const url = import.meta.env.VITE_SUPABASE_URL;
+    const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+
+    if (!url || !anonKey) {
+      setDatabaseStatus('error');
+      setDatabaseError('프로젝트 최상위 .env에 VITE_SUPABASE_URL과 VITE_SUPABASE_ANON_KEY를 설정하세요.');
+      return () => { active = false; };
+    }
+
+    let client: ReturnType<typeof createClient>;
+    try {
+      client = createClient(url, anonKey);
+    } catch {
+      setDatabaseStatus('error');
+      setDatabaseError('Supabase 클라이언트를 초기화하지 못했습니다. .env의 URL과 키 설정을 확인하세요.');
+      return () => { active = false; };
+    }
+
+    const channel = client
+      .channel('readings-inserts')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'readings' }, (payload) => {
+        const sample = parseReading(payload.new);
+        if (!sample) {
+          if (active) setRealtimeError('새 readings 행에 유효한 value 또는 created_at 값이 없습니다.');
+          return;
+        }
+        if (!initialLoadComplete) {
+          pendingReadings = mergeSamples(pendingReadings, [sample]);
+        } else if (active) {
+          setSamples((previous) => mergeSamples(previous, [sample]));
+        }
+      })
+      .subscribe((subscriptionStatus) => {
+        if (!active) return;
+        if (subscriptionStatus === 'SUBSCRIBED') {
+          setRealtimeConnected(true);
+          setRealtimeError('');
+        } else if (subscriptionStatus === 'CHANNEL_ERROR' || subscriptionStatus === 'TIMED_OUT') {
+          setRealtimeConnected(false);
+          setRealtimeError('Supabase Realtime 연결에 실패했습니다. readings 테이블의 Realtime 활성화와 SELECT 권한을 확인하세요.');
+        } else if (subscriptionStatus === 'CLOSED') {
+          setRealtimeConnected(false);
+        }
+      });
+
+    const loadReadings = async () => {
+      try {
+        const { data, error: queryError } = await client
+          .from('readings')
+          .select('value, created_at')
+          .order('created_at', { ascending: false })
+          .limit(100);
+        if (queryError) throw queryError;
+        const loaded = (data ?? [])
+          .map((record) => parseReading(record))
+          .filter((sample): sample is SensorSample => sample !== null)
+          .reverse();
+        initialLoadComplete = true;
+        if (!active) return;
+        setSamples(mergeSamples(loaded, pendingReadings));
+        setDatabaseStatus('ready');
+      } catch {
+        initialLoadComplete = true;
+        if (!active) return;
+        setDatabaseStatus('error');
+        setDatabaseError('Supabase readings 데이터를 불러오지 못했습니다. 테이블, value/created_at 열, SELECT 권한을 확인하세요.');
+      }
+    };
+
+    void loadReadings();
+    return () => {
+      active = false;
+      void client.removeChannel(channel);
+    };
+  }, []);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      stopRef.current = true;
+      const reader = readerRef.current;
+      if (reader) void reader.cancel().catch((cancelError: unknown) => console.error('시리얼 리더 정리 실패', cancelError));
+    };
+  }, []);
+
+  const connectSerial = async () => {
+    const serial = (navigator as Navigator & { serial?: SerialApi }).serial;
+    if (!serial) {
+      if (mountedRef.current) setSerialError('이 브라우저는 Web Serial API를 지원하지 않습니다. Chrome 또는 Edge에서 localhost나 HTTPS로 접속해 주세요.');
+      return;
+    }
+
+    setSerialError('');
+    setStatus('connecting');
+    let port: SerialPortLike | null = null;
+    let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+    let opened = false;
+    let handedOff = false;
+    try {
+      port = await serial.requestPort({ filters: [{ usbVendorId: 0x2341, usbProductId: 0x0043 }] });
+      if (!mountedRef.current) return;
+      await port.open({ baudRate: 9600 });
+      opened = true;
+      if (!mountedRef.current) return;
+      if (!port.readable) throw new Error('시리얼 포트에서 데이터를 읽을 수 없습니다.');
+      reader = port.readable.getReader();
+      readerRef.current = reader;
+      portRef.current = port;
+      stopRef.current = false;
+      setSerialLatest(null);
+      setStatus('connected');
+      handedOff = true;
+      void readSerialData(reader, port);
+    } catch (connectionError) {
+      if (!stopRef.current && mountedRef.current) {
+        setSerialError(connectionError instanceof Error ? connectionError.message : String(connectionError));
+      }
+    } finally {
+      if (!handedOff) {
+        readerRef.current = null;
+        portRef.current = null;
+        if (reader) reader.releaseLock();
+      }
+      if (!handedOff && port && opened) {
+        try {
+          await port.close();
+        } catch (closeError) {
+          if (mountedRef.current) setSerialError(closeError instanceof Error ? closeError.message : String(closeError));
+        }
+      }
+      if (!handedOff && mountedRef.current) setStatus('disconnected');
+    }
+  };
+
+  const readSerialData = async (reader: ReadableStreamDefaultReader<Uint8Array>, port: SerialPortLike) => {
+    const decoder = new TextDecoder();
+    let buffer = '';
+    const addLine = (line: string) => {
+      const text = line.trim();
+      if (!text) return;
+      const value = Number(text);
+      if (!Number.isFinite(value)) return;
+      const time = new Date().toLocaleTimeString('ko-KR', {
+        hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+      });
+      setSerialLatest(value);
+    };
+
+    try {
+      while (!stopRef.current) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (value) {
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split(/\r?\n/);
+          buffer = lines.pop() ?? '';
+          lines.forEach(addLine);
+        }
+      }
+      addLine(buffer + decoder.decode());
+    } catch (readError) {
+      if (!stopRef.current && mountedRef.current) {
+      setSerialError(readError instanceof Error ? readError.message : String(readError));
+      }
+    } finally {
+      readerRef.current = null;
+      portRef.current = null;
+      try {
+        reader.releaseLock();
+      } catch (releaseError) {
+        if (mountedRef.current) setSerialError(releaseError instanceof Error ? releaseError.message : String(releaseError));
+      }
+      try {
+        await port.close();
+      } catch (closeError) {
+        if (mountedRef.current) setSerialError(closeError instanceof Error ? closeError.message : String(closeError));
+      }
+      if (mountedRef.current) setStatus('disconnected');
+    }
+  };
+
+  const disconnectSerial = async () => {
+    stopRef.current = true;
+    try {
+      await readerRef.current?.cancel();
+    } catch (cancelError) {
+      if (mountedRef.current) setSerialError(cancelError instanceof Error ? cancelError.message : String(cancelError));
+      const port = portRef.current;
+      if (port && mountedRef.current) {
+        try {
+          await port.close();
+        } catch (closeError) {
+          setSerialError(closeError instanceof Error ? closeError.message : String(closeError));
+        }
+      }
+      readerRef.current = null;
+      portRef.current = null;
+      if (mountedRef.current) setStatus('disconnected');
+    }
+  };
+
+  const lastSample = samples.at(-1);
+  const databaseStatusText = databaseStatus === 'loading'
+    ? 'Supabase 연결 중'
+    : databaseStatus === 'error'
+      ? 'Supabase 오류'
+      : realtimeConnected
+        ? 'Supabase 실시간 연결됨'
+        : 'Supabase 연결됨';
+  const serialStatusText = status === 'connected' ? '연결됨' : status === 'connecting' ? '연결 중' : '연결 안 됨';
+  const emptyMessage = databaseStatus === 'loading'
+    ? 'Supabase 데이터를 불러오는 중입니다.'
+    : databaseStatus === 'error'
+      ? 'Supabase 데이터에 연결할 수 없습니다.'
+      : 'Supabase에 저장된 센서 데이터가 없습니다.';
+  const errorMessages = [databaseError, realtimeError, serialError].filter(Boolean);
   return <section className="sensor-page">
     <div className="sensor-title">
       <div><div className="eyebrow">LIVE SENSOR MONITOR</div><h1>터치센서 <em>모니터링</em></h1><p>센서의 현재 상태와 시간에 따른 변화를 확인하세요.</p></div>
-      <div className="live-pill"><i /> 실시간 예시 데이터</div>
+      <div className="sensor-controls">
+        <div className={`live-pill ${realtimeConnected ? '' : 'inactive'}`}><i /> {databaseStatusText}</div>
+        <button className="serial-button" onClick={status === 'connected' ? () => void disconnectSerial() : () => void connectSerial()} disabled={status === 'connecting'}>
+          {status === 'connecting' ? '연결 중…' : status === 'connected' ? '연결 끊기' : '시리얼 연결'}
+        </button>
+      </div>
     </div>
     <div className="sensor-overview">
       <article className="current-card">
         <div className="current-head"><span>현재 센서값</span><span className="device-tag">TOUCH—01</span></div>
-        <div className="current-value">{current}<small>%</small></div>
-        <div className="meter"><i style={{ width: `${current}%` }} /></div>
-        <div className="current-foot"><span><i className="status-dot" /> 정상 작동 중</span><span>방금 업데이트</span></div>
+        <div className="current-value">{current === undefined ? '—' : numberFormat.format(current)}</div>
+        <div className="current-foot"><span><i className={`status-dot ${realtimeConnected ? 'online' : ''}`} /> {databaseStatus === 'loading' ? '불러오는 중' : realtimeConnected ? '실시간 수신 중' : databaseStatus === 'error' ? '연결 오류' : '실시간 대기'}</span><span>{lastSample?.time ?? '데이터 없음'}</span></div>
       </article>
       <div className="sensor-mini-grid">
-        <article><span>오늘 최고값</span><strong>84<small>%</small></strong><p>15:10 기록</p></article>
-        <article><span>최근 1시간 평균</span><strong>51<small>%</small></strong><p>12개 데이터 기준</p></article>
-        <article><span>센서 상태</span><strong className="connected">연결됨</strong><p>신호 강도 양호</p></article>
-        <article><span>마지막 터치</span><strong>15:15</strong><p>현재 세션</p></article>
+        <article><span>최근 최고값</span><strong>{highest === null ? '—' : numberFormat.format(highest)}</strong><p>{samples.length}개 데이터 기준</p></article>
+        <article><span>최근 평균</span><strong>{average === null ? '—' : numberFormat.format(average)}</strong><p>{samples.length}개 데이터 기준</p></article>
+        <article><span>아두이노 시리얼</span><strong className={status === 'connected' ? 'connected' : ''}>{serialStatusText}</strong><p>{serialLatest === null ? (status === 'connected' ? '데이터 수신 대기' : '포트를 선택해 연결하세요') : `마지막 값 ${numberFormat.format(serialLatest)} · 9600 baud`}</p></article>
+        <article><span>마지막 데이터</span><strong>{lastSample?.time ?? '—'}</strong><p>Supabase readings 기준</p></article>
       </div>
     </div>
     <article className="card sensor-graph-card">
       <div className="card-head">
-        <div><span className="icon blue"><Icon name="trend"/></span><div><h2>시간별 센서 변화</h2><p>최근 1시간 · 5분 간격 예시 데이터</p></div></div>
-        <div className="range-tabs"><button className="active">1시간</button><button>6시간</button><button>24시간</button></div>
+        <div><span className="icon blue"><Icon name="trend"/></span><div><h2>시간별 센서 변화</h2><p>Supabase readings 테이블의 최근 100개 값</p></div></div>
+        <div className="graph-count">{samples.length} / 100개</div>
       </div>
-      <SensorChart />
+      <SensorChart samples={samples} emptyMessage={emptyMessage} />
     </article>
-    <div className="mock-note"><strong>예시 데이터로 표시 중</strong><span>실제 센서 API 연결 시 현재값과 그래프가 자동으로 갱신됩니다.</span></div>
+    {errorMessages.length
+      ? <div className="serial-error" role="alert">{errorMessages.map((message) => <div key={message}>{message}</div>)}</div>
+      : <div className="mock-note"><strong>Supabase readings 데이터</strong><span>{realtimeConnected ? '새 행이 추가되면 실시간으로 대시보드가 갱신됩니다.' : '최근 100개 행을 시간순으로 표시합니다. 아두이노 시리얼 연결 기능도 사용할 수 있습니다.'}</span></div>}
   </section>;
 }
 
